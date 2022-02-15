@@ -28,6 +28,9 @@ if (!requireNamespace("biomaRt", quietly = TRUE)) {
 if (!requireNamespace("plyr", quietly = TRUE)) {
   install.package("plyr")
 }
+if (!requireNamespace("limma", quietly = TRUE)) {
+  BioCManager::install("limma")
+}
 ```
 
 ## 2. Selecting a dataset
@@ -132,10 +135,11 @@ hugoSymbols <- biomaRt::getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
                               mart = mart)
 ```
 
-After the operation completes (it may take a moment), it is necessary to check that all conversions were successful. In
-particular, a key indicator to look out for is the presence of empty strings post-conversion. This can be checked with
-the following:
+After the operation completes (it may take some time), it is necessary to check that all conversions were successful.
+In particular, a key indicator to look out for is the presence of empty strings post-conversion. This can be checked
+with the following:
 ```{r}
+# Can probably optimize this with a vector operation
 numEmpty <- 0
 for (i in 1:length(hugoSymbols$hgnc_symbol)) {
   # Found a failed conversion (mapping from Ensembl ID to empty string)
@@ -148,7 +152,7 @@ for (i in 1:length(hugoSymbols$hgnc_symbol)) {
 Number of failed mappings: `r numEmpty`
 
 To examine these failures in more detail, we can take a look at one the of the Ensembl gene IDs that was unable to be
-mapped to a HUGO symbol. For example, "ENSG00000280434". When we search for this ID in Ensembl's human database, we
+mapped to a HUGO symbol; for example, "ENSG00000280434". When we search for this ID in Ensembl's human database, we
 find that this is a
 [novel gene](https://useast.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000280434;r=22:44139365-44153626;t=ENST00000624919),
 so it is not surprising that it does not have a direct mapping.
@@ -159,6 +163,7 @@ called insignificant. Thus, for these particular genes, I decided to keep their 
 with the understanding that they could be easily removed in the future if need be.
 
 ```{r}
+# Can probably optimize this with a vector operation
 for (i in 1:length(hugoSymbols$hgnc_symbol)) {
   if (hugoSymbols$hgnc_symbol[i] == "") {
     # Fill in the empty HUGO symbol with the Ensembl ID
@@ -178,7 +183,7 @@ The last step is to simply add the symbols to the counts matrix:
 ```{r}
 # Rename the Ensembl column of the HUGO map so that it can be merged into the counts matrix
 names(hugoSymbols)[names(hugoSymbols) == "ensembl_gene_id"] <- "Gene"
-filteredCounts <- merge(filteredCounts, hugoSymbols, by="Gene", all=TRUE)
+filteredCounts <- merge(filteredCounts, hugoSymbols, by = "Gene", all = TRUE)
 
 # biomaRt misses some IDs, so we need to fill them in manually
 for (i in 1:length(filteredCounts$Gene)) {
@@ -202,9 +207,183 @@ filteredCounts <- filteredCounts[, -numCols]
 
 ## 6. Normalizing the data
 
+Before we start normalizing the data, we should try to visualize it in order to have a point of reference to the
+post-normalized results. Without these, we may accidentally normalize incorrectly. We can start with a simple box plot.
+
+Since there are many samples in the dataset, we can get a good look at what the "overall picture" looks like, but it
+also makes specific details harder to see. Thus, we can add the ability to just look particular subsets of the data by
+introducing some mutable parameters directly in the code snippet.
+```{r}
+preNormBoxPlot <- log2(edgeR::cpm(filteredCounts[, 2:length(filteredCounts[1, ])]))
+# Parameters to control the subset of data to visualize. The default values here correspond to the entire dataset
+useRows <- 1:length(filteredCounts[, 1])
+useCols <- 1:length(filteredCounts[1, ]) - 1
+boxplot(preNormBoxPlot[useRows, useCols],
+        xlab = "Samples",
+        ylab = "log2 CPM",
+        las = 2,
+        cex = 0.3,
+        cex.lab = 0.6,
+        cex.axis = 0.3,
+        main = "Pre-normalized CPM vs samples")
+```
+
+Looking at the edges of a density plot may also help in normalizing the data:
+```{r}
+preNormDensPlot <- apply(log2(edgeR::cpm(filteredCounts[, 2:length(filteredCounts[1, ])])), 2, density)
+
+# Find the limits over the entire dataset
+xlim <- 0
+ylim <- 0
+for (i in 1:length(preNormDensPlot)) {
+  xlim <- range(c(xlim, preNormDensPlot[[i]]$x))
+  ylim <- range(c(ylim, preNormDensPlot[[i]]$y))
+}
+
+cols <- rainbow(length(preNormDensPlot))
+ltys <- rep(1, length(preNormDensPlot))
+
+plot(preNormDensPlot[[1]],
+     xlim = xlim,
+     ylim = ylim,
+     type = "n",
+     main = "Pre-normalized counts density",
+     cex.lab = 0.85)
+for (i in 1:length(preNormDensPlot)) {
+  lines(preNormDensPlot[[i]], col = cols[i], lty = ltys[i])
+}
+# Note that when using the entire dataset, not all the legends can fit in the plot
+legend("topright",
+       colnames(preNormBoxPlot),
+       col = cols,
+       lty = ltys,
+       cex = 0.5,
+       border = "blue",
+       text.col = "green4",
+       merge = TRUE,
+       bg = "gray90")
+```
+
+Before we can actually normalize the data, we need to determine by what groups the data should be normalized to. Here,
+we split the sample names into parts; e.g. "Patient_15_AL_m0" becomes an entry with "patient = 15", "sample.type = AL",
+and "sample.time = m0".
+```{r}
+# Having the splitting function separate (i.e. not a lambda) makes the code a bit cleaner
+splitColNames <- function(colNames) {
+  return(unlist(strsplit(colNames, split = "_"))[c(2, 3, 4)])
+}
+
+colGroups <- data.frame(lapply(colnames(filteredCounts)[2:length(filteredCounts[1, ])], splitColNames))
+colnames(colGroups) <- colnames(filteredCounts)[2:length(filteredCounts[1, ])]
+rownames(colGroups) <- c("patient", "sample.type", "sample.time")
+# Flip the table since we want rows to correspond to samples
+colGroups <- data.frame(t(colGroups))
+```
+
+Now that we have all the prerequisite information and data structures set up, we can go ahead with normalizing the
+counts matrix. The method of choice was trimmed mean of m-values (TMM), because the data fell into the assumption that
+most genes are not differentially expressed. Additionally, the results were similar to normalization by relative log
+expression (RLE).
+```{r}
+# We need the counts matrix to actually be a matrix
+filteredCountsMatrix <- as.matrix(filteredCounts[, 2:length(filteredCounts[1, ])])
+rownames(filteredCountsMatrix) <- filteredCounts$hgnc_symbol
+# Use edgeR to do the TMM process
+normFactors <- edgeR::DGEList(counts = filteredCountsMatrix, group = colGroups$sample.time)
+normFactors <- edgeR::calcNormFactors(normFactors)
+normCounts <- edgeR::cpm(normFactors)
+```
+
+The first comparison we can do is to take a look at how the normalized box plot looks (which is evidently "cleaner"
+than the pre-normalization plot):
+```{r}
+postNormBoxPlot <- log2(normCounts)
+# Again, parameters. Use these to specify subsets
+useRows <- 1:length(filteredCounts[, 1])
+useCols <- 1:length(filteredCounts[1, ]) - 1
+boxplot(postNormBoxPlot[useRows, useCols],
+        xlab = "Samples",
+        ylab = "log2 CPM",
+        las = 2,
+        cex = 0.3,
+        cex.lab = 0.6,
+        cex.axis = 0.3,
+        main = "Post-normalized CPM vs samples")
+```
+
+Next, we check what the normalized density plot looks like (which appears to be slighly better at the edges):
+```{r}
+postNormDensPlot <- apply(log2(normCounts), 2, density)
+
+xlim <- 0
+ylim <- 0
+for (i in 1:length(postNormDensPlot)) {
+  xlim <- range(c(xlim, postNormDensPlot[[i]]$x))
+  ylim <- range(c(ylim, postNormDensPlot[[i]]$y))
+}
+
+cols <- rainbow(length(postNormDensPlot))
+ltys <- rep(1, length(postNormDensPlot))
+
+plot(postNormDensPlot[[1]],
+     xlim = xlim,
+     ylim = ylim,
+     type = "n",
+     main = "Post-normalized counts density",
+     cex.lab = 0.85)
+for (i in 1:length(postNormDensPlot)) {
+  lines(postNormDensPlot[[i]], col = cols[i], lty = ltys[i])
+}
+legend("topright",
+       colnames(postNormBoxPlot),
+       col = cols,
+       lty = ltys,
+       cex = 0.5,
+       border = "blue",
+       text.col = "green4",
+       merge = TRUE,
+       bg = "gray90")
+```
+
+We can also take a look at the normalized counts in a multidimensional scaling plot to visualize the distance between
+samples. Again, the number of samples is quite large, so smaller ranges should be chosen to compare instead of the
+entire counts matrix. By default we use the entire normalized counts matrix, so the initial plot is essentially
+undreadable and useless.
+```{r}
+limma::plotMDS(normFactors, labels = rownames(colGroups), col = c("darkgreen", "blue")[factor(colGroups$sample.time)])
+```
+
+As a final step, we can convert the normalized counts matrix into a dataframe with 19,425 rows (unique genes) and 166
+columns (samples), as required for this assignment:
+```{r}
+cleanedCounts <- as.data.frame(normCounts)
+# Just take a quick peek at the data to make sure the rows and columns are labelled
+knitr::kable(cleanedCounts[1:4, 1:5], format = "html")
+```
 
 ## 7. Interpreting the data
 
+The dataset supposedly contains information for 59 affected patients (30 of which underwent treatment), and 31 healthy
+controls. However, the authors did not label which samples corresponded to affected vs. healthy patients, and this is
+also not mentioned in the publication. I suppose the distinction will become more clear after conducting the expression
+analysis. "AL" means that the sample was taken from a lesional area of the patient and "AN" means it was taken from a
+non-lesional area. "m0" means the sample was taken before treatment started and "m3" means it was taken three months
+into treatment. Of those treated, 22 patients were treated with dupilumab and 8 were treated with cyclosporine, but
+unfortunately again, these are not labelled or distinguished between by the authors in the dataset.
+
+This dataset was of interest to me, because atopic dermatitis is a quite common, possibly autoimmune, disease in the
+general population. In addition, when I first found the dataset when browsing the GEO website, it appeared to be quite
+appropriate for this assignment, with many "samples" available.
+
+In the raw counts matrix, there were no expression values that were not unique to specific genes, but I suppose if
+there were any, I would have just combined the rows with identical symbols together, taking the sum of their counts per
+sample. However, there were expression values that could not be mapped to HUGO symbols (using biomaRt's conversion),
+which was handled by simply setting the Ensembl gene ID as the HUGO symbol. I suppose another method to handle this
+would be to just remove those rows entirely, but I was unsure as to whether that would destroy too much data.
+
+No outliers were removed from the dataset, because after visualization, it did not seem that there were any values that
+significantly differed from the majority of data points. Replicates were handled as individual samples, and after
+filtering, 19,425 genes (or about 50-60%) of the original expression values remain.
 
 ## 8. References
 
