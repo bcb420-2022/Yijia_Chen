@@ -1,0 +1,214 @@
+---
+title: "BCB420 A1 - Dataset selection and initial processing"
+author: "Yijia Chen"
+date: "2022-02-15"
+output: html_notebook
+---
+
+## 1. Setting up
+
+Several R packages are required for this assignment. They can be installed by running the following snippet (if not
+already installed):
+```{r}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  BioCManager::install("GEOquery")
+}
+if (!requireNamespace("knitr", quietly = TRUE)) {
+  install.packages("knitr")
+}
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  BioCManager::install("edgeR")
+}
+if (!requireNamespace("biomaRt", quietly = TRUE)) {
+  BiocManager::install("biomaRt")
+}
+if (!requireNamespace("plyr", quietly = TRUE)) {
+  install.package("plyr")
+}
+```
+
+## 2. Selecting a dataset
+
+The process of selecting a dataset for this assignment has been documented in greater detail as a
+[journal entry](https://github.com/bcb420-2022/Yijia_Chen/wiki/5.-Assignment-1-%E2%80%90--Selecting-a-dataset) in my
+wiki. In summary, I
+
+- Visited the [GEO website](https://www.ncbi.nlm.nih.gov/geo/) and selected "Series" under "Browse Content"
+- Filtered the results by "Organism(s): Homo sapiens" and "Series type(s): Expression profiling by high throughput
+sequencing"
+- Sorted the results by number of samples, descending
+- Advanced through the list and randomly opened datasets
+- Went through each opened dataset and closed inadequate ones (e.g. those missing a publication or counts data)
+- Chose an interesting experiment from the remaining suitable datasets
+
+The final chosen dataset was [GSE157194](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157194), "Atopic
+dermatitis displays stable and dynamic skin transcriptome signatures".
+
+Below are some quick facts about the dataset.
+
+```{r}
+# Code adapted from lecture 4
+gse <- GEOquery::getGEO("GSE157194", GSEMatrix = FALSE)
+gpl <- names(GEOquery::GPLList(gse))[1]
+gplInfo <- GEOquery::Meta(GEOquery::getGEO(gpl))
+```
+
+Platform title: `r gplInfo$title`  
+Submission date: `r gplInfo$submission_date`  
+Last update: `r gplInfo$last_update_date`  
+Organism: `r gplInfo$organism`  
+
+## 3. Downloading the data
+
+The dataset's raw gene counts matrix (a gzipped text file) is the only supplementary file provided. We can download it
+using the following snippet, first checking to see if it has already been downloaded:
+```{r}
+# The supplementary file will be downloaded to a subdirectory in the current working directory
+if (!dir.exists("GSE157194")) {
+  suppFiles <- GEOquery::getGEOSuppFiles("GSE157194")
+  fileName <- rownames(suppFiles)
+  # The gz file will be replaced by a txt file of the same name
+  GEOquery::gunzip(fileName)
+}
+
+# Set the relative filename (without the gz extension)
+fileName <- "GSE157194/GSE157194_Raw_gene_counts_matrix.txt"
+# Read the matrix (txt/tsv file)
+countsMatrix <- read.table(fileName, header = TRUE, check.names = FALSE)
+```
+
+We can take a look at the first few rows and columns of the matrix to check that the data has been read in properly:
+```{r}
+knitr::kable(countsMatrix[1:4, 1:5], format = "html")
+```
+
+## 4. Cleaning the data
+
+We start by examining the data; for example, by checking the dimensions of the matrix and counting the number of unique
+genes:
+
+Number of rows (genes, possibly duplicate): `r dim(countsMatrix)[1]`  
+Number of columns (samples): `r dim(countsMatrix)[2] - 1  # Subtract 1 to account for the gene name`
+
+Since the entries in the "Gene" column take the form of "ENSG00000000000" (with the zeroes being different numbers), we
+can assume that the genes are represented by their Ensembl gene IDs, and so there should be no rows with duplicate IDs.
+
+Number of gene IDs: `r length(countsMatrix$Gene)`  
+Number of unique gene IDs: `r length(unique(countsMatrix$Gene))`
+
+We see that the number of gene IDs is equal to the number of unique gene IDs, so no duplicates need to be taken care
+of. The next step is to filter out genes that have low counts; i.e., those that are weakly expressed and
+noninformative:
+```{r}
+# Compute the counts per million for the matrix
+countsPerMil <- edgeR::cpm(countsMatrix[, 2:dim(countsMatrix)[2]])
+rownames(countsPerMil) <- countsMatrix[, 1]
+
+# The smallest size of a group is just a single sample
+rowsToKeep <- rowSums(countsPerMil > 1) >= 1
+filteredCounts <- countsMatrix[rowsToKeep, ]
+rownames(filteredCounts) <- filteredCounts$Gene
+```
+
+Number of rows before filtering: `r length(countsMatrix$Gene)`  
+Number of rows after filtering: `r length(filteredCounts$Gene)`  
+Change in coverage: `r ((length(filteredCounts$Gene) - length(countsMatrix$Gene)) / length(countsMatrix$Gene)) * 100`%
+
+## 5. Mapping rows to HUGO symbols
+
+The counts matrix in its current form has its rows labelled by Ensembl gene IDs. In order to have the rows labelled by
+HUGO gene symbol instead, we can use the package "biomaRt" to convert between the two.
+```{r}
+# Do a batch conversion on the entire first column of the counts matrix, creating a mapping between Ensembl gene IDs
+# and HUGO gene symbols
+# httr::set_config(httr::config(ssl_verifypeer = FALSE))
+mart <- biomaRt::useEnsembl(biomart = "ensembl", dataset = "hsapiens_gene_ensembl")
+hugoSymbols <- biomaRt::getBM(attributes = c("ensembl_gene_id", "hgnc_symbol"),
+                              filters = "ensembl_gene_id",
+                              values = filteredCounts$Gene,
+                              mart = mart)
+```
+
+After the operation completes (it may take a moment), it is necessary to check that all conversions were successful. In
+particular, a key indicator to look out for is the presence of empty strings post-conversion. This can be checked with
+the following:
+```{r}
+numEmpty <- 0
+for (i in 1:length(hugoSymbols$hgnc_symbol)) {
+  # Found a failed conversion (mapping from Ensembl ID to empty string)
+  if (hugoSymbols$hgnc_symbol[i] == "") {
+    numEmpty <- numEmpty + 1
+  }
+}
+```
+
+Number of failed mappings: `r numEmpty`
+
+To examine these failures in more detail, we can take a look at one the of the Ensembl gene IDs that was unable to be
+mapped to a HUGO symbol. For example, "ENSG00000280434". When we search for this ID in Ensembl's human database, we
+find that this is a
+[novel gene](https://useast.ensembl.org/Homo_sapiens/Gene/Summary?db=core;g=ENSG00000280434;r=22:44139365-44153626;t=ENST00000624919),
+so it is not surprising that it does not have a direct mapping.
+
+At this point, I was unsure what to do with these unsuccessful conversions. I considered just removing their rows, but
+thought that might not be appropriate, as all of these genes have already survived filtering, and so cannot entirely be
+called insignificant. Thus, for these particular genes, I decided to keep their Ensembl IDs in place of HUGO symbols,
+with the understanding that they could be easily removed in the future if need be.
+
+```{r}
+for (i in 1:length(hugoSymbols$hgnc_symbol)) {
+  if (hugoSymbols$hgnc_symbol[i] == "") {
+    # Fill in the empty HUGO symbol with the Ensembl ID
+    hugoSymbols$hgnc_symbol[i] <- hugoSymbols$ensembl_gene_id[i]
+  }
+}
+```
+
+A second check that should be done is to make sure that all rows have unique HUGO symbols; if multiple rows have the
+same symbol, it means that multiple Ensembl IDs matched to a single HUGO symbol.
+
+Number of symbols: `r length(hugoSymbols$hgnc_symbol)`  
+Number of unique symbols: `r unique(length(hugoSymbols$hgnc_symbol))`
+
+We see that the number of symbols is equal to the number of unique symbols, so there is nothing more to deal with.
+The last step is to simply add the symbols to the counts matrix:
+```{r}
+# Rename the Ensembl column of the HUGO map so that it can be merged into the counts matrix
+names(hugoSymbols)[names(hugoSymbols) == "ensembl_gene_id"] <- "Gene"
+filteredCounts <- merge(filteredCounts, hugoSymbols, by="Gene", all=TRUE)
+
+# biomaRt misses some IDs, so we need to fill them in manually
+for (i in 1:length(filteredCounts$Gene)) {
+  if (is.na(filteredCounts$hgnc_symbol[i])) {
+    filteredCounts$hgnc_symbol[i] <- filteredCounts$Gene[i]
+  }
+}
+
+# Combine any rows with duplicate symbols
+filteredCounts <- plyr::ddply(filteredCounts, "hgnc_symbol", plyr::numcolwise(sum))
+
+# For some reason `rownames(filteredCounts) <- filteredCounts$hgnc_symbol` doesn't work
+for (i in 1:length(filteredCounts$hgnc_symbol)) {
+  rownames(filteredCounts)[i] <- filteredCounts$hgnc_symbol[i]
+}
+
+# Remove the "hgnc_symbol" column since it's now the row names
+numCols <- length(filteredCounts[, 1])
+filteredCounts <- filteredCounts[, -numCols]
+```
+
+## 6. Normalizing the data
+
+
+## 7. Interpreting the data
+
+
+## 8. References
+
+Möbus, L., Rodriguez, E., Harder, I., Stölzl, D., Boraczynski, N., Gerdes, S., Kleinheinz, A., Abraham, S.,
+Heratizadeh, A., Handrick, C., Haufe, E., Werfel, T., Schmitt, J., Weidinger, S., & the TREATgermany study group.
+(2020). Atopic dermatitis displays stable and dynamic skin transcriptome signatures. *J Allergy Clin Immun, 147*(1),
+213-223. https://doi.org/10.1016/j.jaci.2020.06.012.
