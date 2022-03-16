@@ -1,10 +1,13 @@
 ---
 title: "BCB420 A2 - Differential gene expression and preliminary ORA"
 author: "Yijia Chen"
-date: "2022-03-15"
-output: html_notebook
-
-# TODO: don't forget to set a ToC and use bibtex
+date: "2022-03-16"
+output:
+  html_notebook:
+    toc: true
+bibliography: A2_citations.bib
+csl: apa.csl
+nocite: "@*"
 ---
 
 ```{r, message = FALSE, warning = FALSE, include = FALSE}
@@ -33,6 +36,7 @@ if (!requireNamespace("circlize", quietly = TRUE)) {
 if (!requireNamespace("EnhancedVolcano", quietly = TRUE)) {
   BiocManager::install("EnhancedVolcano", update = FALSE, ask = FALSE)
 }
+library(EnhancedVolcano)
 ```
 
 ## 1. Introduction
@@ -40,7 +44,7 @@ if (!requireNamespace("EnhancedVolcano", quietly = TRUE)) {
 This notebook contains a differential gene expression analysis and a preliminary thresholded over-representation
 analysis for a selected dataset from the GEO database. The dataset in particular is
 [GSE157194](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157194), which is associated with a publication
-titled "Atopic dermatitis displays stable and dynamic skin transcriptome signatures".
+titled "Atopic dermatitis displays stable and dynamic skin transcriptome signatures" [@mobus].
 
 The goal of the study was to understand the effect of various treatments for atopic dermatitis by conducting a gene
 expression study using mRNA-Seq data taken from biopsies of the affected and non-affected skin of human patients. The
@@ -55,13 +59,14 @@ important note is that the dataset is "incomplete"/has several prominent issues:
 
 No information regarding these missing features were found in the associated paper.
 
-After downloading the raw count matrix from GEO via GEOquery, the data was cleaned (confirming that there were no
-duplicate genes), filtered by gene (removing those without at least one read per million in each sample), and filtered
-by patient (removing those with incomplete data; see the points above). The genes (rows) were labelled by their Ensembl
-gene IDs, which were mapped to HUGO gene symbols using biomaRt, and genes that were unable to be converted (such as
-novel genes) were removed. To normalize the data, trimmed mean of m-values/TMM was used, since we followed the
-assumption that most genes are not differentially expressed. Finally, the data was checked for outliers (none were
-found), and the resulting data frame was written to a tab-delimited txt file (and gzipped for upload to GitHub).
+After downloading the raw count matrix from GEO via GEOquery [@geoquery], the data was cleaned (confirming that there
+were no duplicate genes), filtered by gene (removing those without at least one read per million in each sample), and
+filtered by patient (removing those with incomplete data; see the points above). The genes (rows) were labelled by
+their Ensembl gene IDs, which were mapped to HUGO gene symbols using biomaRt [@biomart], and genes that were unable to
+be converted (such as novel genes) were removed. To normalize the data, trimmed mean of m-values/TMM was used [@edger],
+since we followed the assumption that most genes are not differentially expressed. Finally, the data was checked for
+outliers (none were found), and the resulting data frame was written to a tab-delimited txt file (and gzipped for
+upload to GitHub).
 
 We can load the dataset here and take a look at the first few rows and columns:
 ```{r, message = FALSE, warning = FALSE}
@@ -75,7 +80,6 @@ if (!file.exists(filepath)) {
   GEOquery::gunzip(gzfilepath)
 }
 
-# TODO: for some reason this sometimes throws multithreading errors?
 normalizedCountData <- read.table(file = file.path(getwd(), "normalizedCountData.txt"),
                                   sep = "\t",
                                   header = TRUE,
@@ -112,8 +116,6 @@ heatmapMatrix <- normalizedCountData[, SAMPLE_START:SAMPLE_END]
 
 # Row-normalization can be done with the base scale function on the transposed matrix
 heatmapMatrix <- t(scale(t(heatmapMatrix)))
-# Scaling sometimes results in some values being NA for whatever reason
-# TODO: this is probably a bad hack; look into this later
 heatmapMatrix[is.na(heatmapMatrix)] <- 0
 
 if (min(heatmapMatrix) == 0) {
@@ -184,8 +186,8 @@ for.
 
 To try and control for these variables, we can use various packages that provide methods specialized for differential
 expression analysis. In particular, edgeR is a package especially suited for bulk RNA-Seq analysis, containing several
-linear methods that we can use. We start by setting up the counts header into individual categories, which should make
-it easier to use different parts of the data for different analyses or plots.
+linear methods that we can use [@edger]. We start by setting up the counts header into individual categories, which
+should make it easier to use different parts of the data for different analyses or plots.
 
 ```{r, message = FALSE, warning = FALSE}
 # Defines different groups that can be combined for different things (adapted from A1)
@@ -276,7 +278,6 @@ results in downstream analysis.
 # Essentially the same as before, but with additional data
 modelDesignPatient <- model.matrix(~ groups$Patient + groups$Sample.time)
 dgelist <- edgeR::DGEList(counts = normalizedCountData, group = groups$Sample.time)
-# TODO: more unknown undeterministic multithreading errors here
 dgelist <- edgeR::estimateDisp(dgelist, modelDesignPatient)
 modelFit <- edgeR::glmQLFit(dgelist, modelDesignPatient)
 
@@ -299,7 +300,7 @@ significantly differentially expressed increases, which is not unexpected.
 A quick next step is to try and find genes of interest; e.g., those that are the most differentially expressed. One
 method of accomplishing this task is to use a volcano plot, which puts p-value against log-fold change. In this way,
 genes with the most meaningful or significant changes will be found near the top-left and top-right corners of the
-graph. Here, the R package EnhancedVolcano is used to quickly throw together such a plot.
+graph. Here, the R package EnhancedVolcano is used to quickly throw together such a plot [@enhancedvolcano].
 
 ```{r, message = FALSE, warning = FALSE}
 # Get the log-fold change and p-values from the patient-variability-included model
@@ -489,3 +490,125 @@ write.table(downregGenes,
             col.names = FALSE,
             quote = FALSE)
 ```
+
+The technique that has been chosen to perform this analysis is Fisher's exact test, done through g:Profiler
+[@gprofiler]. Fisher's exact test is a common statistical method to check for overrepresentation, which is the goal of
+this analysis, and is able to calculate the deviation from p-values exactly. g:Profiler is a common, convenient
+(accessible online and through an R package) implementation of Fisher's exact test that is updated fairly regularly,
+which can help increase the accuracy of the analysis. For our purpose, and in the interest of time, g:Profiler will be
+accessed through its website (instead of using the R package).
+
+The annotation datasets that have been selected include GO biological processes (updated 2021-12-15) - without
+electronic annotations, Reactome (updated 2022-01-03), and WikiPathways (updated 2021-12-10). These three datasets are
+major annotation resources, and have been updated fairly recently, so it is reasonable to expect accuracte results.
+Other major resources such as KEGG have not been included because they may add additional extraneous information to the
+results, and with these three datasets, there should already be enough information for a thorough analysis.
+
+We will start by looking at subsets of the genes of interest (i.e., those with significant differential expression),
+and then follow up by analyzing the entire set to compare how looking at different parts of the data may affect the
+results. For each run, FDR will be used for multiple hypothesis correction, with a threshold p-value of 0.05. This was
+chosen instead of the more stringent 0.01 to allow for more information and a broader look at the associated pathways.
+In addition, the resulting pathways were filtered to only include those with gene set sizes of 200 or less. This is
+because of the inheritance-like property of the annotation resources, which may clutter the results by including
+pathways that are too generic.
+
+### Upregulated genes
+
+The first subset is all upregulated genes with significant differential expression. The list of upregulated genes (from
+the code snippet above) was copied to g:Profiler, the mentioned options were set (with all results checked), and the
+analysis was run. The result was the following figure:
+
+![Figure 1. upregulated genes only](figures/gprof_up.png)
+
+g:Profiler has omitted titles for the plot and table, but appropriate ones would be "Over-representation of upregulated
+genes with p-value < 0.05" and "Highest scoring pathways for gene sets with size less than 200", respectively.
+
+Using the thresholds mentioned previously, GO:BP found 5,027 pathways, REAC found 1,007, and WP found 445. The plot at
+the top of the figure is a visual representation of adjusted p-values vs. resource, where each dot represents a
+specific pathway (each annotation resource has its own colour). The table at the bottom of the figure is a list of the
+top (approximately 15) pathways, according to adjusted p-value, for each resource. The individual pathways are given
+numbers, and these correspond to the labelling of the dots in the plot above. We see that despite being the pathways
+with the greatest adjusted p-value, these labelled dots are not the highest on the plot because of the thresholds that
+were used; the unlabelled dots would represent more generic pathways.
+
+The specific pathways that were found here--for example, collagen fibril organization and several fatty acid metabolic
+processes--are not obviously indicative of AD, a skin disease of autoimmune origin.
+
+### Downregulated genes
+
+The second subset is all downregulated genes with significant differential expression. The list of downregulated genes
+was copied to g:Profiler, options were set (this time without all results, since the list of genes was too large), and
+the analysis was run. The result was the following figure:
+
+![Figure 2. downregulated genes only](figures/gprof_down.png)
+
+g:Profiler has omitted titles for the plot and table, but appropriate ones would be "Over-representation of
+downregulated genes with p-value < 0.05" and "Highest scoring pathways for gene sets with size less than 200",
+respectively.
+
+Using the thresholds mentioned previously, GO:BP found 230 pathways, REAC found 72, and WP found 52. The specific
+pathways that were found here--for example, various DNA replication pathways and cell cycle signalling--is, like the
+upregulated genes, not directly related to AD. However, these examples are not as broad, and it is possible that there
+is an indirect link. For example, psoriasis, another skin condition similar to atopic dermatitis, is directly related
+to the disregulation of the cell cycle of skin cells, so it would not be a surprise to see a similar result here.
+
+### All differentially expressed genes
+
+It is important to consider the entire set of differentially expressed genes as a whole, because it is possible that
+the particular pathways that we are expecting have both upregulated and downregulated genes. The result of running
+g:Profiler on the list of combined genes is as follows:
+
+![Figure 3. all differentially expressed genes](figures/gprof_de.png)
+
+g:Profiler has omitted titles for the plot and table, but appropriate ones would be "Over-representation of significant
+differentially expressed genes with p-value < 0.05" and "Highest scoring pathways for gene sets with size less than
+200", respectively.
+
+Using the thresholds mentioned previously, GO:BP found 130 pathways, REAC found 37, and WP found 15. When we put both
+the upregulated genes and downregulated genes together through over-representation analysis, it appears that we get a
+better overall image of the pathways that AD affects. For example, the top GO:BP hit is now directly related to skin
+development, an obvious link to AD. In addition, we see other pathways related to immune function; for example, the
+Toll-like receptor 4 (TLR4) cascade, which is responsible for the production of cytokines.
+
+Since many of these pathways were not present when only the up- or downregulated genes were considered, it is possible
+to conclude that AD is involved in more complex pathways that cannot be restricted to just one type of gene. The entire
+set of differentially expressed genes needs to be considered, and only then will the relevant pathways appear.
+
+## 4. Interpretation
+
+With regard to the differential expression analysis, several of the most significant genes that were found were also
+found by the authors of the original paper. For example, one with a particularly high level of expression was IL19,
+with the paper stating that they "detected a notable expression of IL19 ... in AL", exactly what was found here.
+However, this analysis did find some highly expressed genes that were not of note in the paper; for example, NPTX2,
+related to the C-reactive protein, was not noted in the paper. Additionally, other genes like IL31 and IL23 that were
+noted in the paper were not among the most expressed genes here. Thus, we can say that for this part of the notebook,
+the results are at least partially supported by the original paper.
+
+When looking at pathways, the result of over-representation analysis, we see some similarities between those that were
+found here and those that were found in the original paper. The paper states that the "core transcriptome signature" of
+AD patients is characterized by epidermal differentiation and itch pathways, and gives sebaceous glands as an example.
+In the ORA of all differentially expressed genes, the highest scored pathway is related to skin development, of which
+"sebaceous gland development" is a child.
+
+Additional pathways that were found in both include general Toll-like receptor signalling, interleukin signalling, and
+several other immune-related pathways. However, the paper does mention specific examples like Th17 cell differentiation
+and the IL-17 signalling pathway, which were not exactly found in the ORA. Thus, we should be able to conclude that for
+this part of the notebook, the results overall are supported by the original paper, but in order to confirm the
+presence of more specific pathways, more detailed examination must be done.
+
+When considering the differentially expressed genes and pathways, another way of looking for evidence to support that
+the analyses in this notebook (other than comparing with the original paper) is to look for additional papers that
+have reached the same conclusion. One study [@oka] showed that IL-19, one of the most significantly expressed
+interleukin genes found here, was notably increased in patients with AD. Statistical analysis (primarily done via the
+Mann-Whitney U test) was performed, and in summary, concluded that there was statistically significant evidence to
+suggest that AD patients had elevated IL-19 protein levels, a reflection of significant expression.
+
+A second paper [@panzer] found that AD patients also have significant levels of TLR4 expression as part of
+Toll-like receptor signalling pathways. Samples from lesional skin were taken, incubated with TLR4 antibodies, and then
+RNA was extracted, which was found to show constitutive expression of TLR4. There have even been previous studies on
+using dupilumab and cyclosporine to treat AD; a thid paper [@mansouri] specifically studied the effects of these drugs
+on human immune pathways, and found that they are able to block some interleukin signalling pathways, which in turn
+resulted in clinical improvements. Thus, this shows that there is further support for the pathways discovered by the
+ORA conducted here.
+
+## 5. References
