@@ -1,0 +1,468 @@
+---
+title: "BCB420 A2 - Differential gene expression and preliminary ORA"
+author: "Yijia Chen"
+date: "2022-03-15"
+output: html_notebook
+
+# TODO: don't forget to set a ToC and use bibtex
+---
+
+## 1. Setting up
+
+Several R packages are required to run this notebook. They can be installed by running the following snippet:
+```{r, message = FALSE, warning = FALSE, echo = FALSE, results = "hide"}
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  BioCManager::install("GEOquery")
+}
+if (!requireNamespace("knitr", quietly = TRUE)) {
+  install.packages("knitr")
+}
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  BioCManager::install("edgeR")
+}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+  BiocManager::install("ComplexHeatmap")
+}
+if (!requireNamespace("circlize", quietly = TRUE)) {
+  install.packages("circlize")
+}
+if (!requireNamespace("EnhancedVolcano", quietly = TRUE)) {
+  BiocManager::install("EnhancedVolcano", update = FALSE, ask = FALSE)
+}
+```
+
+## 2. Introduction
+
+This notebook contains a differential gene expression analysis and a preliminary thresholded over-representation
+analysis for a selected dataset from the GEO database. The dataset in particular is
+[GSE157194](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157194), which is associated with a publication
+titled "Atopic dermatitis displays stable and dynamic skin transcriptome signatures".
+
+The goal of the study was to understand the effect of various treatments for atopic dermatitis by conducting a gene
+expression study using mRNA-Seq data taken from biopsies of the affected and non-affected skin of human patients. The
+dataset contains data for 57 patients, with samples of affected (intrapersonal lesional) and non-affected
+(non-lesional) skin, along with follow-ups after three months of treatment (with either dupilumab or cyclosporine). An
+important note is that the dataset is "incomplete"/has several prominent issues:
+
+- There is no distinction between patients and controls (or the control patients were omitted, which is likely)
+- Not all patients have samples for both affected and non-affected skin
+- Not all patients have follow-up data after treatment
+- No patients are labelled with which drug (dupilumab/cyclosporine) was used as treatment
+
+No information regarding these missing features were found in the associated paper.
+
+After downloading the raw count matrix from GEO via GEOquery, the data was cleaned (confirming that there were no
+duplicate genes), filtered by gene (removing those without at least one read per million in each sample), and filtered
+by patient (removing those with incomplete data; see the points above). The genes (rows) were labelled by their Ensembl
+gene IDs, which were mapped to HUGO gene symbols using biomaRt, and genes that were unable to be converted (such as
+novel genes) were removed. To normalize the data, trimmed mean of m-values/TMM was used, since we followed the
+assumption that most genes are not differentially expressed. Finally, the data was checked for outliers (none were
+found), and the resulting data frame was written to a tab-delimited txt file (and gzipped for upload to GitHub).
+
+We can load the dataset here and take a look at the first few rows and columns:
+```{r, message = FALSE, warning = FALSE, error = FALSE}
+# The dataset should originally be compressed (GitHub 25 MB)
+filepath <- file.path(getwd(), "normalizedCountData.txt")
+if (!file.exists(filepath)) {
+  gzfilepath <- file.path(getwd(), "normalizedCountData.txt.gz")
+  if (!file.exists(gzfilepath)) {
+    stop("Dataset not found")
+  }
+  GEOquery::gunzip(gzfilepath)
+}
+
+# TODO: for some reason this sometimes throws multithreading errors?
+normalizedCountData <- read.table(file = file.path(getwd(), "normalizedCountData.txt"),
+                                  sep = "\t",
+                                  header = TRUE,
+                                  stringsAsFactors = FALSE,
+                                  check.names = FALSE)
+knitr::kable(normalizedCountData[1:4, 1:4], type = "html")
+```
+
+Number of patients: `r ncol(normalizedCountData) / 4`  
+Number of samples: `r ncol(normalizedCountData)`  
+Number of genes: `r nrow(normalizedCountData)`
+
+The column names are formatted "Patient_\<patient number\>\_\<AN|AL\>_\<m0|m3\>", where AN means intrapersonal
+non-lesional, AL means intrapersonal lesional, m0 means the sample was taken before treatment, and m3 means the sample
+was taken after three months of treatment. Note the absence of patient 2 between patients 1 and 3, who was removed due
+to missing data.
+
+## 3. Differential gene expression
+
+The corresponding journal entry for this assignment can be found
+[here](https://github.com/bcb420-2022/Yijia_Chen/wiki/8.-Assignment-2-%E2%80%90-Additional-work-and-details).
+
+First, we should inspect the data as a heatmap to get a general idea of gene expression levels. But before we do that,
+we should row-normalize it, which scales rows and centres them around the mean, so that no particular gene completely
+dominates the plot.
+
+```{r, message = FALSE, warning = FALSE}
+# Parameters to select the range of samples to use. The matrix has 17,747 rows and 96 columns, and if too much data is
+# chosen, the code will crash
+SAMPLE_START <- 1
+# Setting SAMPLE_END to 12 has been tested to crash
+SAMPLE_END <- 8
+heatmapMatrix <- normalizedCountData[, SAMPLE_START:SAMPLE_END]
+
+# Row-normalization can be done with the base scale function on the transposed matrix
+heatmapMatrix <- t(scale(t(heatmapMatrix)))
+# Scaling sometimes results in some values being NA for whatever reason
+# TODO: this is probably a bad hack; look into this later
+heatmapMatrix[is.na(heatmapMatrix)] <- 0
+
+if (min(heatmapMatrix) == 0) {
+  # No negative values => colours should only range from white to red
+  heatmapColours <- circlize::colorRamp2(c(0, max(heatmapMatrix)),
+                                         c("white", "red"))
+} else {
+  # Has negative values => use blue for those
+  heatmapColours <- circlize::colorRamp2(c(min(heatmapMatrix), 0, max(heatmapMatrix)),
+                                         c("blue", "white", "red"))
+}
+
+currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmapMatrix),
+                                       show_row_dend = TRUE,
+                                       show_column_dend = FALSE,
+                                       col = heatmapColours,
+                                       show_column_names = TRUE,
+                                       show_row_names = FALSE,
+                                       show_heatmap_legend = TRUE,
+                                       cluster_columns = FALSE,
+                                       name = "Key",
+                                       column_title = "Normalized heatmap")
+
+# Displaying the heatmap may take a while to run, or just crash. Uncomment the following line with discretion
+currHeatmap
+```
+
+By default (and only if the last line in the code snippet directly above is not commented out), the heatmap will be
+displayed for four samples (two patients, both before treatment). The parameters at the start of the code snippet can
+be changed to display different parts of the entire heatmap. Regardless, we can already see that there is significant
+variation in the data between different patients. This will need to be taken into account when doing further analysis.
+
+### Testing a single gene
+
+The authors of the paper hypothesized that IL13 (interleukin 13, a gene related to type 2 cytokines and chemokines),
+among others, were responsible for the lesions found in patients with AD, so we can run a quick test to see if there is
+any change in expression for this particular gene among the entire set of patients.
+
+```{r, message = FALSE, warning = FALSE}
+# Get the columns corresponding to pre- and post-treatment affected samples
+preTreatAffSamples <- grep(colnames(normalizedCountData), pattern = "_AL_m0")
+postTreatAffSamples <- grep(colnames(normalizedCountData), pattern = "_AL_m3")
+
+# Find the row index of IL13 in the data
+il13Idx <- which(rownames(normalizedCountData) == "IL13")
+
+# Format the expression levels (for both pre- and post-treatment) in a table for comparison
+il13Expr <- t(normalizedCountData[il13Idx, preTreatAffSamples])
+il13Expr <- as.data.frame(il13Expr)
+il13Expr <- cbind(il13Expr, t(normalizedCountData[il13Idx, postTreatAffSamples]))
+colnames(il13Expr) <- c("Pre-treatment", "Post-treatment")
+
+# A visual inspection of some of the data may be interesting
+knitr::kable(il13Expr[1:8, ], type = "html")
+```
+
+Looking at the expression change may not necessarily be conclusive, so we can also try a simple t-test.
+
+```{r, message = FALSE, warning = FALSE}
+t.test(x = t(il13Expr$`Pre-treatment`), y=t(il13Expr$`Post-treatment`))
+```
+
+We see that the results of the test do not suggest a difference in expression before and after treatment for the entire
+set of patients, which provides evidence to suggest that patient variation is a major factor that needs to be accounted
+for.
+
+### Creating a model
+
+To try and control for these variables, we can use various packages that provide methods specialized for differential
+expression analysis. In particular, edgeR is a package especially suited for bulk RNA-Seq analysis, containing several
+linear methods that we can use. We start by setting up the counts header into individual categories, which should make
+it easier to use different parts of the data for different analyses or plots.
+
+```{r, message = FALSE, warning = FALSE}
+# Defines different groups that can be combined for different things (adapted from A1)
+splitColNames <- function(colNames) {
+  return(unlist(strsplit(colNames, split = "_"))[c(2, 3, 4)])
+}
+groups <- data.frame(lapply(colnames(normalizedCountData), splitColNames))
+colnames(groups) <- colnames(normalizedCountData)
+rownames(groups) <- c("Patient", "Sample type", "Sample time")
+groups <- data.frame(t(groups))
+
+# Check the first few lines of the whole table to make sure the groups have been defined properly
+knitr::kable(groups[1:4, ], type = "html")
+```
+
+Next, we can throw (parts of) the data into an MDS plot in order to get some insight as to how we should set up our
+linear models.
+
+```{r, message = FALSE, warning = FALSE}
+# Parameters to select which subset of data to plot
+PATIENT_START <- 1
+PATIENT_END <- 5
+# Get the affected subset of the data
+affectedCountData <- normalizedCountData[grep(colnames(normalizedCountData), pattern = "_AL_")
+                                         ][, c(PATIENT_START:PATIENT_END, (PATIENT_START + 24):(PATIENT_END + 24))]
+affectedGroups <- groups[groups$Sample.type == "AL",
+                         ][c(PATIENT_START:PATIENT_END, (PATIENT_START + 24):(PATIENT_END + 24)), ]
+
+# Build the MDS plot, colouring by time (pre- and post-treatment)
+dgelist <- edgeR::DGEList(counts = affectedCountData, group = affectedGroups$Sample.time)
+edgeR::plotMDS.DGEList(dgelist, labels = rownames(affectedGroups),
+                       col = c("darkgreen", "blue")[factor(affectedGroups$Sample.time)])
+title(main = "Distance between samples, coloured by treatment time")
+legend(x = "bottomleft", legend = c("Pre-treatment", "Post-treatment"), fill = c("darkgreen", "blue"))
+```
+
+Also try grouping by patient to see approximately how much variability there is.
+
+```{r, message = FALSE, warning = FALSE}
+# Colour by patient number
+patientColours <- rainbow(PATIENT_END - PATIENT_START + 1)
+edgeR::plotMDS.DGEList(dgelist, labels = rownames(affectedGroups),
+                       col = patientColours)
+title(main = "Distance between samples, coloured by patient number")
+```
+
+We see that there is no especially obvious clustering in treatment time or individual patient, which could be explained
+by the imperfect data; e.g., perhaps the patients shown here used different drugs or some were actually controls.
+Regardless, there is incentive to try fitting the data to a linear model to see if any improvements can be found.
+
+edgeR provides a convenient quasi-likelihood method, has been recommended for bulk RNA-Seq experiments, and is often
+used for more complicated models. Since the dataset that we are working with is quite large and complex, it may be a
+good candidate to use. We will first try a straightforward model that does not account for patient variability.
+
+```{r, message = FALSE, warning = FALSE}
+# Create a linear design matrix for edgeR quasi likelihood in treatment time
+modelDesign <- model.matrix(~ groups$Sample.time)
+dgelist <- edgeR::DGEList(counts = normalizedCountData, group = groups$Sample.time)
+dgelist <- edgeR::estimateDisp(dgelist, modelDesign)
+modelFit <- edgeR::glmQLFit(dgelist, modelDesign)
+
+# Extract the results
+qlfTime <- edgeR::glmQLFTest(modelFit, coef = "groups$Sample.timem3")
+qlfHits <- edgeR::topTags(qlfTime, sort.by = "PValue", n = nrow(normalizedCountData))
+knitr::kable(edgeR::topTags(qlfTime)[1:8, ], type = "html")
+```
+
+Number of genes that pass the threshold p-value (0.05): `r length(which(qlfHits$table$PValue < 0.05))`  
+Number of genes that pass correction (FDR): `r length(which(qlfHits$table$FDR < 0.05))`
+
+We see that a fairly large number of genes are differentially expressed, even after correction for multiple hypothesis
+testing with false discovery rate (FDR), so an even stronger threshold can be considered. This will allow for a greater
+level of confidence when analyzing the data, and also put greater emphasis on which genes can be considered "more
+important".
+
+Number that pass a stricter p-value (0.01): `r length(which(qlfHits$table$PValue < 0.01))`  
+Number that pass correction (FDR): `r length(which(qlfHits$table$FDR < 0.01))`
+
+Even stricter thresholds could be considered (such as 0.001), but we do not want to completely throw away the remainder
+of the signal, which could be myopic. We can next try to fit the data to a model that incorporates patient number into
+it, which may have better results in downstream analysis.
+
+```{r, message = FALSE, warning = FALSE, error = FALSE}
+# Essentially the same as before, but with additional data
+modelDesignPatient <- model.matrix(~ groups$Patient + groups$Sample.time)
+dgelist <- edgeR::DGEList(counts = normalizedCountData, group = groups$Sample.time)
+# TODO: more unknown undeterministic multithreading errors here
+dgelist <- edgeR::estimateDisp(dgelist, modelDesignPatient)
+modelFit <- edgeR::glmQLFit(dgelist, modelDesignPatient)
+
+qlfTime <- edgeR::glmQLFTest(modelFit, coef = "groups$Sample.timem3")
+qlfHitsPatient <- edgeR::topTags(qlfTime, sort.by = "PValue", n = nrow(normalizedCountData))
+knitr::kable(edgeR::topTags(qlfTime[1:8, ]), type = "html")
+```
+
+Number of genes that pass the threshold p-value (0.05): `r length(which(qlfHitsPatient$table$PValue < 0.05))`  
+Number of genes that pass correction (FDR): `r length(which(qlfHitsPatient$table$FDR < 0.05))`
+
+Number that pass a stricter p-value (0.01): `r length(which(qlfHitsPatient$table$PValue < 0.01))`  
+Number that pass correction (FDR): `r length(which(qlfHitsPatient$table$FDR < 0.01))`
+
+When applying a model that takes patient variability into account, we see that the number of genes that were
+significantly differentially expressed rises, which is not unexpected.
+
+### Genes of interest
+
+A quick next step is to try and find genes of interest; e.g., the most differentially expressed. One method of
+accomplishing this task is to use a volcano plot, which puts p-value against log-fold change. In this way, genes with
+the most meaningful or significant changes will be found near the top-left and top-right corners of the graph. Here,
+the R package EnhancedVolcano is used to quickly throw together such a plot.
+
+```{r, message = FALSE, warning = FALSE}
+# Get the log-fold change and p-values from the patient-variability-included model
+volcano <- data.frame(log2FC = qlfTime$table$logFC, PValue = qlfTime$table$PValue)
+rownames(volcano) <- rownames(normalizedCountData)
+EnhancedVolcano::EnhancedVolcano(volcano, lab = rownames(volcano), x = "log2FC", y = "PValue",
+                                 title = "Differentially expressed genes")
+```
+
+We see that the vast majority of genes (17,747 in total) are not significantly differentially expressed, being plotted
+toward the bottom-centre of the graph, but there are a few genes that present themselves as of interest. For example,
+the plot identifies CCL18, IL19, NPTX2, ADORA3, ALOX15, SPARC, ACSM6, and SPINK9 as genes with significant differences
+in levels of expression.
+
+The next step is to return to looking at heatmaps; we can now plot the results of applying the quasi-likelihood model
+to the data, which may result in clearer clusters that can be visually identified.
+
+```{r, message = FALSE, warning = FALSE}
+# Using the stricter p-value threshold
+topHits <- rownames(qlfHits$table)[qlfHits$table$PValue < 0.01]
+# Warning: heatmapMatrix may only have been built with a subset of the data. topHeatmapMatrix here will reflect that
+# subset. Change SAMPLE_START and SAMPLE_END in the code snippet at the start of this section to change the selected
+# data
+topHeatmapMatrix <- t(scale(t(heatmapMatrix[which(rownames(heatmapMatrix) %in% topHits), ])))
+topHeatmapMatrix[is.na(topHeatmapMatrix)] <- 0
+
+if (min(topHeatmapMatrix) == 0) {
+  heatmapColours <- circlize::colorRamp2(c(0, max(topHeatmapMatrix)),
+                                         c("white", "red"))
+} else {
+  heatmapColours <- circlize::colorRamp2(c(min(topHeatmapMatrix), 0, max(topHeatmapMatrix)),
+                                         c("blue", "white", "red"))
+}
+
+currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
+                                       show_row_dend = TRUE,
+                                       show_column_dend = TRUE,
+                                       col = heatmapColours,
+                                       show_column_names = TRUE,
+                                       show_row_names = FALSE,
+                                       show_heatmap_legend = TRUE,
+                                       cluster_columns = FALSE,
+                                       name = "Key",
+                                       column_title = "Top hits heatmap")
+
+currHeatmap
+```
+
+This heatmap is not particularly useful in determining if differentially expressed genes cluster, because the columns
+are ordered such that individual patient data is paired together. For example, the first column is the control sample
+for the first patient (the non-affected skin) pre-treatment, and the second column is the affected skin sample, also
+pre-treatment. It should be possible to get a better idea of clustering over time by reordering the columns.
+
+```{r, message = FALSE, warning = FALSE}
+# Build a new heatmap matrix to decouple from SAMPLE_START and SAMPLE_END
+reHeatmapMatrix <- normalizedCountData
+reHeatmapMatrix <- t(scale(t(reHeatmapMatrix)))
+reHeatmapMatrix[is.na(reHeatmapMatrix)] <- 0
+
+# Don't know how to do this in a one-liner
+newIdxs <- integer(SAMPLE_END - SAMPLE_START + 1)
+currIdx <- 1
+# Add the *_AN_m0 first
+for (i in seq(SAMPLE_START, SAMPLE_END, 2)) {
+  newIdxs[currIdx] <- i
+  currIdx <- currIdx + 1
+}
+# Then add the *_AN_m3
+for (i in seq(SAMPLE_START, SAMPLE_END, 2)) {
+  newIdxs[currIdx] <- i + 48
+  currIdx <- currIdx + 1
+}
+
+topHeatmapMatrix <- t(scale(t(reHeatmapMatrix[which(rownames(reHeatmapMatrix) %in% topHits), ])))
+topHeatmapMatrix[is.na(topHeatmapMatrix)] <- 0
+topHeatmapMatrix <- topHeatmapMatrix[, newIdxs]
+
+currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
+                                       show_row_dend = TRUE,
+                                       show_column_dend = TRUE,
+                                       col = heatmapColours,
+                                       show_column_names = TRUE,
+                                       show_row_names = FALSE,
+                                       show_heatmap_legend = TRUE,
+                                       cluster_columns = FALSE,
+                                       name = "Key",
+                                       column_title = "Top hits, control, over time")
+
+currHeatmap
+```
+
+The above heatmap has been rearranged such that all eight columns are control (non-affected/non-lesional) skin of
+affected patients, with the left four columns being samples taken just prior to treatment, and the right four samples
+(respective to the former) being taken three months after treatment. Since this subset of the dataset does not contain
+any samples of affected (lesional) skin, it is not surprising that levels of gene expression are similar across the two
+categories. The most obvious difference would be with respect to patient 3 (and patient 1, to a certain extent), where
+the follow-up sample has greater levels of regulation--but it is still of the same type.
+
+```{r, message = FALSE, warning = FALSE}
+# Doing the same as above except with *_AL_* instead of *_AN_*
+newIdxs <- integer(SAMPLE_END - SAMPLE_START + 1)
+currIdx <- 1
+for (i in seq(SAMPLE_START + 1, SAMPLE_END + 1, 2)) {
+  newIdxs[currIdx] <- i
+  currIdx <- currIdx + 1
+}
+for (i in seq(SAMPLE_START + 1, SAMPLE_END + 1, 2)) {
+  newIdxs[currIdx] <- i + 48
+  currIdx <- currIdx + 1
+}
+
+topHeatmapMatrix <- t(scale(t(reHeatmapMatrix[which(rownames(reHeatmapMatrix) %in% topHits), ])))
+topHeatmapMatrix[is.na(topHeatmapMatrix)] <- 0
+topHeatmapMatrix <- topHeatmapMatrix[, newIdxs]
+
+currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
+                                       show_row_dend = TRUE,
+                                       show_column_dend = TRUE,
+                                       col = heatmapColours,
+                                       show_column_names = TRUE,
+                                       show_row_names = FALSE,
+                                       show_heatmap_legend = TRUE,
+                                       cluster_columns = FALSE,
+                                       name = "Key",
+                                       column_title = "Top hits, over time")
+
+currHeatmap
+```
+
+When we look at the heatmap concerning affected skin, the differential expression is more obvious and more significant.
+There are many clusters of genes on the right side of the plot that correspond inversely to the same region on the left
+side of the plot. For example, the column of patient 7 has a large, strongly expressed group of genes near the middle
+of the column. However, when looking at the same area on the left side of the heatmap, the expression of the same genes
+is very weak in comparison. Thus, we can hypothesize that perhaps these differentially expressed genes may be
+responsible for AD and/or its symptoms.
+
+## 4. Thresholded over-representation analysis
+
+In this next part of the notebook, the sets of significantly up-regulated and down-regulated genes will be run through
+a thresholded gene set enrichment analysis. The first step is to get the lists of such genes.
+
+```{r, message = FALSE, warning = FALSE}
+# Construct the ranked gene list (non-thresholded)
+qlfHits <- as.data.frame(qlfHitsPatient)
+qlfHits["rank"] <- -log(qlfHits$PValue, base = 10) * sign(qlfHits$logFC)
+qlfHits <- qlfHits[order(qlfHits$rank), ]
+
+write.table(data.frame(genename = rownames(qlfHits), Fstat = qlfHits$rank),
+            file = file.path(getwd(), "rankedGenelist.txt"),
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+# For the thresholded lists, use p = 0.05 instead of 0.01 to get more results
+upregGenes <- rownames(qlfHits[which(qlfHits$PValue < 0.05 & qlfHits$logFC > 0), ])
+write.table(upregGenes,
+            file = file.path(getwd(), "upregulatedGenes.txt"),
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+
+downregGenes <- rownames(qlfHits[which(qlfHits$PValue < 0.05 & qlfHits$logFC < 0), ])
+write.table(downregGenes,
+            file = file.path(getwd(), "downregulatedGenes.txt"),
+            sep = "\t",
+            row.names = FALSE,
+            col.names = FALSE,
+            quote = FALSE)
+```
