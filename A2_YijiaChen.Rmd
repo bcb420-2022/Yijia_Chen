@@ -7,10 +7,11 @@ output: html_notebook
 # TODO: don't forget to set a ToC and use bibtex
 ---
 
-## 1. Setting up
+```{r, message = FALSE, warning = FALSE, include = FALSE}
+# Several R packages are required to run this notebook. They can be installed by running this snippet
+# This snippet will not be included in the final report because the installation of EnhancedVolcano will always
+# generate output that cannot be suppressed by message = FALSE or warning = FALSE
 
-Several R packages are required to run this notebook. They can be installed by running the following snippet:
-```{r, message = FALSE, warning = FALSE, echo = FALSE, results = "hide"}
 if (!requireNamespace("BiocManager", quietly = TRUE)) {
   install.packages("BiocManager")
 }
@@ -34,7 +35,7 @@ if (!requireNamespace("EnhancedVolcano", quietly = TRUE)) {
 }
 ```
 
-## 2. Introduction
+## 1. Introduction
 
 This notebook contains a differential gene expression analysis and a preliminary thresholded over-representation
 analysis for a selected dataset from the GEO database. The dataset in particular is
@@ -63,7 +64,7 @@ assumption that most genes are not differentially expressed. Finally, the data w
 found), and the resulting data frame was written to a tab-delimited txt file (and gzipped for upload to GitHub).
 
 We can load the dataset here and take a look at the first few rows and columns:
-```{r, message = FALSE, warning = FALSE, error = FALSE}
+```{r, message = FALSE, warning = FALSE}
 # The dataset should originally be compressed (GitHub 25 MB)
 filepath <- file.path(getwd(), "normalizedCountData.txt")
 if (!file.exists(filepath)) {
@@ -92,7 +93,7 @@ non-lesional, AL means intrapersonal lesional, m0 means the sample was taken bef
 was taken after three months of treatment. Note the absence of patient 2 between patients 1 and 3, who was removed due
 to missing data.
 
-## 3. Differential gene expression
+## 2. Differential gene expression
 
 The corresponding journal entry for this assignment can be found
 [here](https://github.com/bcb420-2022/Yijia_Chen/wiki/8.-Assignment-2-%E2%80%90-Additional-work-and-details).
@@ -105,7 +106,7 @@ dominates the plot.
 # Parameters to select the range of samples to use. The matrix has 17,747 rows and 96 columns, and if too much data is
 # chosen, the code will crash
 SAMPLE_START <- 1
-# Setting SAMPLE_END to 12 has been tested to crash
+# Setting SAMPLE_END to 12 or more has been tested to crash
 SAMPLE_END <- 8
 heatmapMatrix <- normalizedCountData[, SAMPLE_START:SAMPLE_END]
 
@@ -134,14 +135,14 @@ currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(heatmapMatrix),
                                        show_heatmap_legend = TRUE,
                                        cluster_columns = FALSE,
                                        name = "Key",
-                                       column_title = "Normalized heatmap")
+                                       column_title = "Normalized heatmap of samples")
 
-# Displaying the heatmap may take a while to run, or just crash. Uncomment the following line with discretion
+# Displaying the heatmap may take a while to run, or just crash
 currHeatmap
 ```
 
 By default (and only if the last line in the code snippet directly above is not commented out), the heatmap will be
-displayed for four samples (two patients, both before treatment). The parameters at the start of the code snippet can
+displayed for eight samples (four patients, both before treatment). The parameters at the start of the code snippet can
 be changed to display different parts of the entire heatmap. Regardless, we can already see that there is significant
 variation in the data between different patients. This will need to be taken into account when doing further analysis.
 
@@ -217,8 +218,8 @@ affectedGroups <- groups[groups$Sample.type == "AL",
 dgelist <- edgeR::DGEList(counts = affectedCountData, group = affectedGroups$Sample.time)
 edgeR::plotMDS.DGEList(dgelist, labels = rownames(affectedGroups),
                        col = c("darkgreen", "blue")[factor(affectedGroups$Sample.time)])
-title(main = "Distance between samples, coloured by treatment time")
 legend(x = "bottomleft", legend = c("Pre-treatment", "Post-treatment"), fill = c("darkgreen", "blue"))
+title(main = "Distance between samples, coloured by treatment time")
 ```
 
 Also try grouping by patient to see approximately how much variability there is.
@@ -235,7 +236,7 @@ We see that there is no especially obvious clustering in treatment time or indiv
 by the imperfect data; e.g., perhaps the patients shown here used different drugs or some were actually controls.
 Regardless, there is incentive to try fitting the data to a linear model to see if any improvements can be found.
 
-edgeR provides a convenient quasi-likelihood method, has been recommended for bulk RNA-Seq experiments, and is often
+edgeR provides a convenient quasi-likelihood method that has been recommended for bulk RNA-Seq experiments and is often
 used for more complicated models. Since the dataset that we are working with is quite large and complex, it may be a
 good candidate to use. We will first try a straightforward model that does not account for patient variability.
 
@@ -255,19 +256,23 @@ knitr::kable(edgeR::topTags(qlfTime)[1:8, ], type = "html")
 Number of genes that pass the threshold p-value (0.05): `r length(which(qlfHits$table$PValue < 0.05))`  
 Number of genes that pass correction (FDR): `r length(which(qlfHits$table$FDR < 0.05))`
 
-We see that a fairly large number of genes are differentially expressed, even after correction for multiple hypothesis
-testing with false discovery rate (FDR), so an even stronger threshold can be considered. This will allow for a greater
-level of confidence when analyzing the data, and also put greater emphasis on which genes can be considered "more
-important".
+Since we are doing many tests, the probability that a positive result will occur simply by chance is increased. To
+control for this, we can use a method of multiple hypothesis testing, which will try to correct the positivity rate.
+edgeR's quasi-likelihood method does this by using false discovery rate, a fairly common way to correct the data.
 
-Number that pass a stricter p-value (0.01): `r length(which(qlfHits$table$PValue < 0.01))`  
-Number that pass correction (FDR): `r length(which(qlfHits$table$FDR < 0.01))`
+We see that a fairly large number of genes are differentially expressed, even after correction with FDR, so an even
+stronger threshold can be considered. This will allow for greater levels of confidence when analyzing the data, and
+will also put a greater emphasis on which genes can be considered to be more important because they are significantly
+differentially expressed.
 
-Even stricter thresholds could be considered (such as 0.001), but we do not want to completely throw away the remainder
-of the signal, which could be myopic. We can next try to fit the data to a model that incorporates patient number into
-it, which may have better results in downstream analysis.
+Number of genes that pass a stricter p-value (0.01): `r length(which(qlfHits$table$PValue < 0.01))`  
+Number of genes that pass correction (FDR): `r length(which(qlfHits$table$FDR < 0.01))`
 
-```{r, message = FALSE, warning = FALSE, error = FALSE}
+Even stricter thresholds could be considered (such as 0.001), but we do not want to completely throw away the weaker
+signal. We can next try to fit the data to a model that incorporates patient number into it, which may have better
+results in downstream analysis.
+
+```{r, message = FALSE, warning = FALSE}
 # Essentially the same as before, but with additional data
 modelDesignPatient <- model.matrix(~ groups$Patient + groups$Sample.time)
 dgelist <- edgeR::DGEList(counts = normalizedCountData, group = groups$Sample.time)
@@ -283,18 +288,18 @@ knitr::kable(edgeR::topTags(qlfTime[1:8, ]), type = "html")
 Number of genes that pass the threshold p-value (0.05): `r length(which(qlfHitsPatient$table$PValue < 0.05))`  
 Number of genes that pass correction (FDR): `r length(which(qlfHitsPatient$table$FDR < 0.05))`
 
-Number that pass a stricter p-value (0.01): `r length(which(qlfHitsPatient$table$PValue < 0.01))`  
-Number that pass correction (FDR): `r length(which(qlfHitsPatient$table$FDR < 0.01))`
+Number of genes that pass a stricter p-value (0.01): `r length(which(qlfHitsPatient$table$PValue < 0.01))`  
+Number of genes that pass correction (FDR): `r length(which(qlfHitsPatient$table$FDR < 0.01))`
 
-When applying a model that takes patient variability into account, we see that the number of genes that were
-significantly differentially expressed rises, which is not unexpected.
+When applying a model that takes patient variability into account, we see that the number of genes that are
+significantly differentially expressed increases, which is not unexpected.
 
 ### Genes of interest
 
-A quick next step is to try and find genes of interest; e.g., the most differentially expressed. One method of
-accomplishing this task is to use a volcano plot, which puts p-value against log-fold change. In this way, genes with
-the most meaningful or significant changes will be found near the top-left and top-right corners of the graph. Here,
-the R package EnhancedVolcano is used to quickly throw together such a plot.
+A quick next step is to try and find genes of interest; e.g., those that are the most differentially expressed. One
+method of accomplishing this task is to use a volcano plot, which puts p-value against log-fold change. In this way,
+genes with the most meaningful or significant changes will be found near the top-left and top-right corners of the
+graph. Here, the R package EnhancedVolcano is used to quickly throw together such a plot.
 
 ```{r, message = FALSE, warning = FALSE}
 # Get the log-fold change and p-values from the patient-variability-included model
@@ -329,6 +334,11 @@ if (min(topHeatmapMatrix) == 0) {
                                          c("blue", "white", "red"))
 }
 
+groupColours <- c("blue", "red")
+names(groupColours) <- unique(groups$Sample.type)
+heatmapAnno <- ComplexHeatmap::HeatmapAnnotation(df = data.frame(Type = groups$Sample.type[SAMPLE_START:SAMPLE_END]),
+                                                 col = list(type = groupColours))
+
 currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_row_dend = TRUE,
                                        show_column_dend = TRUE,
@@ -338,15 +348,16 @@ currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_heatmap_legend = TRUE,
                                        cluster_columns = FALSE,
                                        name = "Key",
-                                       column_title = "Top hits heatmap")
+                                       column_title = "Top hits heatmap",
+                                       top_annotation = heatmapAnno)
 
 currHeatmap
 ```
 
 This heatmap is not particularly useful in determining if differentially expressed genes cluster, because the columns
-are ordered such that individual patient data is paired together. For example, the first column is the control sample
-for the first patient (the non-affected skin) pre-treatment, and the second column is the affected skin sample, also
-pre-treatment. It should be possible to get a better idea of clustering over time by reordering the columns.
+are ordered such that individual patient data is paired together. For example, the first column here is the control
+sample for the first patient (the non-affected skin) pre-treatment, and the second column is the affected skin sample,
+also pre-treatment. It should be possible to get a better idea of clustering over time by reordering the columns.
 
 ```{r, message = FALSE, warning = FALSE}
 # Build a new heatmap matrix to decouple from SAMPLE_START and SAMPLE_END
@@ -372,6 +383,11 @@ topHeatmapMatrix <- t(scale(t(reHeatmapMatrix[which(rownames(reHeatmapMatrix) %i
 topHeatmapMatrix[is.na(topHeatmapMatrix)] <- 0
 topHeatmapMatrix <- topHeatmapMatrix[, newIdxs]
 
+groupColours <- c("blue", "red")
+names(groupColours) <- unique(groups$Sample.time)
+heatmapAnno <- ComplexHeatmap::HeatmapAnnotation(df = data.frame(Time = groups$Sample.time[newIdxs]),
+                                                 col = list(type = groupColours))
+
 currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_row_dend = TRUE,
                                        show_column_dend = TRUE,
@@ -381,17 +397,18 @@ currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_heatmap_legend = TRUE,
                                        cluster_columns = FALSE,
                                        name = "Key",
-                                       column_title = "Top hits, control, over time")
+                                       column_title = "Top hits, control, over time",
+                                       top_annotation = heatmapAnno)
 
 currHeatmap
 ```
 
 The above heatmap has been rearranged such that all eight columns are control (non-affected/non-lesional) skin of
 affected patients, with the left four columns being samples taken just prior to treatment, and the right four samples
-(respective to the former) being taken three months after treatment. Since this subset of the dataset does not contain
-any samples of affected (lesional) skin, it is not surprising that levels of gene expression are similar across the two
-categories. The most obvious difference would be with respect to patient 3 (and patient 1, to a certain extent), where
-the follow-up sample has greater levels of regulation--but it is still of the same type.
+being taken after three months of treatment. Since this subset of the dataset does not contain any samples of affected
+(lesional) skin, it is not surprising that levels of gene expression are similar across the two categories. The most
+obvious difference would be with respect to patient 3 (and patient 1, to a certain extent), where the follow-up sample
+has greater levels of regulation--but it is still of the same type.
 
 ```{r, message = FALSE, warning = FALSE}
 # Doing the same as above except with *_AL_* instead of *_AN_*
@@ -410,6 +427,11 @@ topHeatmapMatrix <- t(scale(t(reHeatmapMatrix[which(rownames(reHeatmapMatrix) %i
 topHeatmapMatrix[is.na(topHeatmapMatrix)] <- 0
 topHeatmapMatrix <- topHeatmapMatrix[, newIdxs]
 
+groupColours <- c("blue", "red")
+names(groupColours) <- unique(groups$Sample.time)
+heatmapAnno <- ComplexHeatmap::HeatmapAnnotation(df = data.frame(Time = groups$Sample.time[newIdxs]),
+                                                 col = list(type = groupColours))
+
 currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_row_dend = TRUE,
                                        show_column_dend = TRUE,
@@ -419,7 +441,8 @@ currHeatmap <- ComplexHeatmap::Heatmap(as.matrix(topHeatmapMatrix),
                                        show_heatmap_legend = TRUE,
                                        cluster_columns = FALSE,
                                        name = "Key",
-                                       column_title = "Top hits, over time")
+                                       column_title = "Top hits, over time",
+                                       top_annotation = heatmapAnno)
 
 currHeatmap
 ```
@@ -431,18 +454,18 @@ of the column. However, when looking at the same area on the left side of the he
 is very weak in comparison. Thus, we can hypothesize that perhaps these differentially expressed genes may be
 responsible for AD and/or its symptoms.
 
-## 4. Thresholded over-representation analysis
+## 3. Thresholded over-representation analysis
 
 In this next part of the notebook, the sets of significantly up-regulated and down-regulated genes will be run through
 a thresholded gene set enrichment analysis. The first step is to get the lists of such genes.
 
 ```{r, message = FALSE, warning = FALSE}
 # Construct the ranked gene list (non-thresholded)
-qlfHits <- as.data.frame(qlfHitsPatient)
-qlfHits["rank"] <- -log(qlfHits$PValue, base = 10) * sign(qlfHits$logFC)
-qlfHits <- qlfHits[order(qlfHits$rank), ]
+qlfHitsT <- as.data.frame(qlfHitsPatient)
+qlfHitsT["rank"] <- -log(qlfHitsT$PValue, base = 10) * sign(qlfHitsT$logFC)
+qlfHitsT <- qlfHitsT[order(qlfHitsT$rank), ]
 
-write.table(data.frame(genename = rownames(qlfHits), Fstat = qlfHits$rank),
+write.table(data.frame(genename = rownames(qlfHitsT), Fstat = qlfHitsT$rank),
             file = file.path(getwd(), "rankedGenelist.txt"),
             sep = "\t",
             row.names = FALSE,
@@ -450,7 +473,7 @@ write.table(data.frame(genename = rownames(qlfHits), Fstat = qlfHits$rank),
             quote = FALSE)
 
 # For the thresholded lists, use p = 0.05 instead of 0.01 to get more results
-upregGenes <- rownames(qlfHits[which(qlfHits$PValue < 0.05 & qlfHits$logFC > 0), ])
+upregGenes <- rownames(qlfHitsT[which(qlfHitsT$PValue < 0.05 & qlfHitsT$logFC > 0), ])
 write.table(upregGenes,
             file = file.path(getwd(), "upregulatedGenes.txt"),
             sep = "\t",
@@ -458,7 +481,7 @@ write.table(upregGenes,
             col.names = FALSE,
             quote = FALSE)
 
-downregGenes <- rownames(qlfHits[which(qlfHits$PValue < 0.05 & qlfHits$logFC < 0), ])
+downregGenes <- rownames(qlfHitsT[which(qlfHitsT$PValue < 0.05 & qlfHitsT$logFC < 0), ])
 write.table(downregGenes,
             file = file.path(getwd(), "downregulatedGenes.txt"),
             sep = "\t",
