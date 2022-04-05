@@ -1,0 +1,57 @@
+---
+title: "BCB420 A3 - Dataset Pathway and Network Analysis"
+author: "Yijia Chen"
+date: "2022-04-05"
+output:
+  html_notebook:
+    toc: true
+bibliography: A3_citations.bib
+csl: apa.csl
+nocite: "@*"
+---
+
+```{r, message = FALSE, warning = FALSE, include = FALSE}
+# Several R packages are required to run this notebook. They can be installed by running this snippet
+# This snippet will not be included in the final report because the installation of EnhancedVolcano will always
+# generate output that cannot be suppressed by message = FALSE or warning = FALSE
+
+if (!requireNamespace("BiocManager", quietly = TRUE)) {
+  install.packages("BiocManager")
+}
+if (!requireNamespace("GEOquery", quietly = TRUE)) {
+  BioCManager::install("GEOquery")
+}
+if (!requireNamespace("knitr", quietly = TRUE)) {
+  install.packages("knitr")
+}
+if (!requireNamespace("edgeR", quietly = TRUE)) {
+  BioCManager::install("edgeR")
+}
+if (!requireNamespace("ComplexHeatmap", quietly = TRUE)) {
+  BiocManager::install("ComplexHeatmap")
+}
+if (!requireNamespace("circlize", quietly = TRUE)) {
+  install.packages("circlize")
+}
+if (!requireNamespace("EnhancedVolcano", quietly = TRUE)) {
+  BiocManager::install("EnhancedVolcano", update = FALSE, ask = FALSE)
+}
+library(EnhancedVolcano)
+```
+
+## 1. Introduction
+
+
+## 2. Non-Thresholded Gene Set Enrichment Analysis
+
+
+## 3. Visualization of Gene Set Enrichment Analysis (Cytoscape)
+
+
+## 4. Interpretation
+
+
+## 5. Step 3
+
+
+## 6. References
