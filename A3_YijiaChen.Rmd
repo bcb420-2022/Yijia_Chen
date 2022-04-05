@@ -41,6 +41,23 @@ library(EnhancedVolcano)
 
 ## 1. Introduction
 
+This notebook contains a pathway and network analysis for the set of ranked genes obtained from the GEO dataset
+[GSE157194](https://www.ncbi.nlm.nih.gov/geo/query/acc.cgi?acc=GSE157194), associated with the publication "Atopic
+dermatitis displays stable and dynamic skin transcriptome signatures" [@mobus]. The goal of the study was to understand
+the effects of the drugs dupilumab and cyclosporine on atopic dermatitis (AD) by conducting a gene expression study
+using mRNA-seq data taken from biopsies of human patients.
+
+The raw count matrix was first downloaded via GEOquery [@geoquery], and then the data was cleaned to confirm that no
+duplicates were present. Next, the data was filtered by gene, removing those without at least one read per million in
+each sample, and also by patient, removing those with incomplete data. Ensembl IDs were mapped to HUGO gene symbols
+using biomaRt [@biomart], and genes that were unable to be converted (e.g., novel genes) were removed. To normalize the
+data, trimmed mean of m-values was used [@edger], since the assumption was that most genes were not differentially
+expressed.
+
+The list of genes was used to perform a differential gene expression analysis using a quasi-likelihood model [@edger],
+and the resulting p-values for each gene were converted to rank (using the formula
+$\text{-}\hspace{-0.6mm}\log_{10}(p\text{-}value) \times \text{sign}(logFC)$). The resulting set of ranked genes was
+sorted by descending rank and written to the file rankedGeneList.txt, which will be the starting point for GSEA.
 
 ## 2. Non-Thresholded Gene Set Enrichment Analysis
 
@@ -55,3 +72,54 @@ library(EnhancedVolcano)
 
 
 ## 6. References
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
