@@ -306,28 +306,9 @@ on the primary enrichment map to determine if it can be verified here.
 
 First, we will download the FDA-approved DrugBank dataset for human use (this GMT file is targeted because we already
 know that dupilumab and cyclosporine have been approved for use in treating AD). This can be done in a very similar
-fashion as to how the GSEA gene set was downloaded from the Bader Lab previously; the following snippet accomplishes
-exactly that. Alternatively, since the post-analysis will be run locally, it can also be downloaded directly from
-within Cytoscape by loading the signature gene set from the web.
-
-``` {r, message = FALSE, warning = FALSE, results = "hide"}
-# Get a list of all the available gene set files
-gsUrl <- "http://download.baderlab.org/EM_Genesets/current_release/Human/symbol/DrugTargets/"
-files <- RCurl::getURL(gsUrl)
-conn <- textConnection(files)
-contents <- readLines(conn)
-close(conn)
-
-# Changed the regex to look for "approved" drugs
-regex <- gregexpr("(?<=<a href=\")(.*.approved.*.)(.gmt)(?=\">)", contents, perl = TRUE)
-gmt <- unlist(regmatches(contents, regex))
-
-# Download the file if it has not been downloaded already
-gmtFile <- file.path(getwd(), gmt)
-if (!file.exists(gmtFile)) {
-  download.file(paste(gsUrl, gmt, sep = ""), destfile = gmtFile)
-}
-```
+fashion as to how the GSEA gene set was downloaded from the Bader Lab previously; alternatively, since the post-
+analysis will be run locally, it can also be downloaded directly from within Cytoscape by loading the signature gene
+set from the web.
 
 We will begin with a targeted apporach, using only the known signatures of these two drugs. A copy of the GMT file was
 made, and all lines other than dupilumab and cyclosporine were removed. This was loaded as the signature set in
